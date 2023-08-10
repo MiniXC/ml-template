@@ -219,7 +219,7 @@ def main():
         scheduler = get_linear_schedule_with_warmup(
             optimizer,
             num_warmup_steps=training_args.lr_warmup_steps,
-            num_training_steps=len(train_dl) * training_args.n_epochs,
+            num_training_steps=training_args.n_steps,
         )
     else:
         raise NotImplementedError(f"{training_args.lr_schedule} not implemented")
@@ -236,24 +236,9 @@ def main():
         return
 
     console.rule("Training")
-    if training_args.n_steps is not None and training_args.n_epochs is not None:
-        raise ValueError("n_steps and n_epochs are mutually exclusive")
-    if training_args.n_steps is not None:
-        pbar_total = training_args.n_steps
-        training_args.n_epochs = training_args.n_steps // len(train_dl) + 1
-    else:
-        pbar_total = len(train_dl) * training_args.n_epochs
-    if (
-        training_args.eval_every_n_epochs is not None
-        and training_args.eval_every_n_steps is not None
-    ):
-        raise ValueError(
-            "eval_every_n_epochs and eval_every_n_steps are mutually exclusive"
-        )
-    if training_args.eval_every_n_epochs is not None:
-        training_args.eval_every_n_steps = training_args.eval_every_n_epochs * len(
-            train_dl
-        )
+    pbar_total = training_args.n_steps
+    training_args.n_epochs = training_args.n_steps // len(train_dl) + 1
+    console.print(f"[green]n_epochs[/green]: {training_args.n_epochs}")
     pbar = tqdm(total=pbar_total, desc="step")
     for i in range(training_args.n_epochs):
         train_epoch(i)

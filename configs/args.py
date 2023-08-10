@@ -14,7 +14,6 @@ class TrainingArgs:
     wandb_dir: str = "wandb"
     train_split: str = "train"
     val_split: str = "test"
-    n_epochs: int = 5
     n_steps: int = None
     batch_size: int = 32
     seed: int = 0
@@ -27,7 +26,6 @@ class TrainingArgs:
     save_onnx: bool = False
     eval_only: bool = False
     eval_every_n_steps: int = 1000
-    eval_every_n_epochs: int = None
     save_every_n_steps: int = 1000
     do_push_to_hub: bool = False
     hub_repo: str = None
