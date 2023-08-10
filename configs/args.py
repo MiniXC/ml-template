@@ -14,12 +14,14 @@ class TrainingArgs:
     wandb_dir: str = "wandb"
     train_split: str = "train"
     val_split: str = "test"
-    n_epochs: int = 10
+    n_epochs: int = 5
     batch_size: int = 32
     seed: int = 0
     dataset: str = "mnist"
     train_collator: str = "default"
     val_collator: str = "default"
+    log_every_n_steps: int = 100
+    do_eval: bool = True
 
 
 @dataclass

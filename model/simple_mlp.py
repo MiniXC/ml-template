@@ -1,5 +1,6 @@
 from pathlib import Path
 from collections import OrderedDict
+import os
 
 import yaml
 import torch
@@ -23,7 +24,7 @@ class SimpleMLP(nn.Module):
         self.mlp = nn.Sequential(
             OrderedDict(
                 [
-                    ("layer_in_linear", nn.Linear(1, args.hidden_dim)),
+                    ("layer_in_linear", nn.Linear(28 * 28, args.hidden_dim)),
                     ("layer_in_gelu", nn.GELU()),
                 ]
             )
@@ -35,7 +36,7 @@ class SimpleMLP(nn.Module):
             )
             self.mlp.add_module(f"layer_{n}_gelu", nn.GELU())
 
-        self.mlp.add_module("layer_out_linear", nn.Linear(args.hidden_dim, 1))
+        self.mlp.add_module("layer_out_linear", nn.Linear(args.hidden_dim, 10))
 
         self.args = args
 
@@ -49,13 +50,16 @@ class SimpleMLP(nn.Module):
         with open(path / "config.yml", "w") as f:
             f.write(yaml.dump(self.args.__dict__, Dumper=yaml.Dumper))
 
-    def save_and_push_to_hub(self, path):
+    def save_and_push_to_hub(self, repo, path):
         self.save_model(path)
         try:
             self.export_onnx(path / "model.onnx")
         except Exception as e:
             console.print(f"[red]Skipping ONNX export[/red]: {e}")
-        return push_to_hub(path)
+        token = os.getenv("HUGGING_FACE_HUB_TOKEN", default=None)
+        if token is None:
+            raise ValueError("$HUGGING_FACE_HUB_TOKEN is not set")
+        return push_to_hub(repo, path, token)
 
     @staticmethod
     def from_pretrained(path_or_hubid):
@@ -75,15 +79,15 @@ class SimpleMLP(nn.Module):
     @property
     def dummy_input(self):
         torch.manual_seed(0)
-        return torch.randn(1, 1)
+        return torch.randn(1, 28 * 28)
 
     def export_onnx(self, path):
         path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         torch.onnx.export(
             self,
             self.dummy_input,
-            path / "model.onnx",
+            path,
             input_names=["input"],
             output_names=["output"],
             dynamic_axes={

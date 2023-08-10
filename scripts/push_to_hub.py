@@ -8,7 +8,9 @@ def main():
     parser = ArgumentParser(
         description="Push a checkpoint directory to the huggingface model hub."
     )
+    print(os.environ)
     token = os.getenv("HUGGING_FACE_HUB_TOKEN", default=None)
+    print(token)
     if token is None:
         raise ValueError("$HUGGING_FACE_HUB_TOKEN is not set")
     parser.add_argument("checkpoint_path", type=str, default=None)

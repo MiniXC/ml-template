@@ -1,13 +1,16 @@
 from pathlib import Path
 import os
+import tempfile
+import shutil
 
 import wandb
 from huggingface_hub import Repository, create_repo
 import huggingface_hub
-from git import Repo
 from rich.prompt import Prompt
 from rich.console import Console
+
 console = Console()
+
 
 def wandb_update_config(*args):
     if len(args) == 1 and isinstance(args[0], dict):
@@ -18,38 +21,60 @@ def wandb_update_config(*args):
     for arg in args:
         wandb.config.update(arg)
 
+
 def wandb_init(wandb_name, wandb_project, wandb_dir, wandb_mode):
     os.environ["WANDB_SILENT"] = "true"
     console.rule("Weights & Biases")
     if wandb_mode == "offline":
-        console.print(f'logging in [dark_orange][b]OFFLINE[/b][/dark_orange] mode to [magenta][b]{wandb_dir}[/b][/magenta] directory')
+        console.print(
+            f"logging in [dark_orange][b]OFFLINE[/b][/dark_orange] mode to [magenta][b]{wandb_dir}[/b][/magenta] directory"
+        )
     if wandb_mode == "online":
         wandb_dir = Path(wandb_dir)
         wandb_dir.mkdir(parents=True, exist_ok=True)
-        wandb_last_input = (wandb_dir / "last_input.txt")
+        wandb_last_input = wandb_dir / "last_input.txt"
         if wandb_last_input.exists():
-            last_project, last_name = open(wandb_last_input, 'r').read().split()
+            last_project, last_name = open(wandb_last_input, "r").read().split()
         else:
             last_project, last_name = (None, None)
         if wandb_project is None:
             wandb_project = Prompt.ask("wandb project", default=last_project)
         if wandb_name is None:
             wandb_name = Prompt.ask("wandb name", default=last_name)
-        console.print(f'logging in [green][b]ONLINE[/b][/green] mode to [magenta][b]{wandb_project}[/b][/magenta] project')
+        console.print(
+            f"logging in [green][b]ONLINE[/b][/green] mode to [magenta][b]{wandb_project}[/b][/magenta] project"
+        )
     console.print(f"run name: [magenta][b]{wandb_name}[/b][/magenta]")
     wandb.init(name=wandb_name, project=wandb_project, dir=wandb_dir, mode=wandb_mode)
     os.environ["WANDB_SILENT"] = "false"
+
 
 def push_to_hub(repo_name, checkpoint_dir, hub_token, commit_message="update model"):
     try:
         create_repo(repo_name, token=hub_token)
     except huggingface_hub.utils._errors.HfHubHTTPError:
-        console.print(f'[magenta]{repo_name}[/magenta] already exists')
+        console.print(f"[magenta]{repo_name}[/magenta] already exists")
+    temp_dict = {}
+    console.print(
+        f"pushing [magenta]{checkpoint_dir}[/magenta] to [magenta]{repo_name}[/magenta]"
+    )
     try:
         repo = Repository(checkpoint_dir, clone_from=repo_name, token=hub_token)
+        repo.git_pull()
     except EnvironmentError:
+        for file in Path(checkpoint_dir).glob("*"):
+            temp_copy = tempfile.NamedTemporaryFile(delete=False)
+            temp_copy.write(file.read_bytes())
+            temp_copy.close()
+            temp_dict[file.name] = temp_copy.name
+        shutil.rmtree(checkpoint_dir)
         repo = Repository(checkpoint_dir, clone_from=repo_name, token=hub_token)
-    repo.git_pull()
+        repo.git_pull()
+        for name, path in temp_dict.items():
+            # copy file to repo
+            shutil.copy(path, checkpoint_dir / name)
+            # add file to git
+    repo.git_add(".")  # add all files
     git_head_commit_url = repo.push_to_hub(
         commit_message=commit_message, blocking=True, auto_lfs_prune=True
     )
