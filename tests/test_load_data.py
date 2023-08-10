@@ -37,7 +37,7 @@ OUT_SHAPE = (1, 10)
 def test_train_dataloader():
     for batch in train_dataloader:
         assert batch["image"].shape == (default_args.batch_size, 28 * 28)
-        assert batch["target"].shape == (default_args.batch_size, 1)
+        assert batch["target"].shape == (default_args.batch_size,)
         assert batch["target_onehot"].shape == (default_args.batch_size, 10)
         assert batch["image"].max() <= 1
         assert batch["image"].min() >= 0
@@ -49,7 +49,7 @@ def test_train_dataloader():
 def test_val_dataloader():
     for batch in val_dataloader:
         assert batch["image"].shape == (default_args.batch_size, 28 * 28)
-        assert batch["target"].shape == (default_args.batch_size, 1)
+        assert batch["target"].shape == (default_args.batch_size,)
         assert batch["target_onehot"].shape == (default_args.batch_size, 10)
         assert batch["image"].max() <= 1
         assert batch["image"].min() >= 0
