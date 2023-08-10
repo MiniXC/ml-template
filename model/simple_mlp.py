@@ -43,19 +43,25 @@ class SimpleMLP(nn.Module):
     def forward(self, x):
         return self.mlp(x)
 
-    def save_model(self, path):
+    def save_model(self, path, onnx=False):
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         torch.save(self.state_dict(), path / "pytorch_model.bin")
+        if onnx:
+            try:
+                self.export_onnx(path / "model.onnx")
+            except Exception as e:
+                console.print(f"[red]Skipping ONNX export[/red]: {e}")
         with open(path / "config.yml", "w") as f:
             f.write(yaml.dump(self.args.__dict__, Dumper=yaml.Dumper))
 
-    def save_and_push_to_hub(self, repo, path):
+    def save_and_push_to_hub(self, repo, path, onnx=False):
         self.save_model(path)
-        try:
-            self.export_onnx(path / "model.onnx")
-        except Exception as e:
-            console.print(f"[red]Skipping ONNX export[/red]: {e}")
+        if onnx:
+            try:
+                self.export_onnx(path / "model.onnx")
+            except Exception as e:
+                console.print(f"[red]Skipping ONNX export[/red]: {e}")
         token = os.getenv("HUGGING_FACE_HUB_TOKEN", default=None)
         if token is None:
             raise ValueError("$HUGGING_FACE_HUB_TOKEN is not set")

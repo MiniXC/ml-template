@@ -1,5 +1,4 @@
 import sys
-import os
 
 sys.path.append(".")  # add root of project to path
 
@@ -33,19 +32,23 @@ from model.simple_mlp import SimpleMLP
 from collators import get_collator
 
 
-def wandb_log(prefix, log_dict, round_n=3):
+def wandb_log(prefix, log_dict, round_n=3, print_log=True):
     log_dict = {f"{prefix}/{k}": v for k, v in log_dict.items()}
     if accelerator.is_local_main_process:
-        wandb.log(log_dict)
-        log_dict = {k: round(v, round_n) for k, v in log_dict.items()}
-        console.log(log_dict)
+        wandb.log(log_dict, step=global_step)
+        if print_log:
+            log_dict = {k: round(v, round_n) for k, v in log_dict.items()}
+            console.log(log_dict)
 
 
-def train_epoch():
+def train_epoch(epoch):
+    global global_step
     model.train()
     losses = deque(maxlen=training_args.log_every_n_steps)
     step = 0
-    for batch in tqdm(train_dl, desc="Step"):
+    console.rule(f"Epoch {epoch}")
+    last_loss = None
+    for batch in train_dl:
         y = model(batch["image"])
         loss = torch.nn.functional.cross_entropy(y, batch["target"])
         accelerator.backward(loss)
@@ -58,29 +61,88 @@ def train_epoch():
             and step % training_args.log_every_n_steps == 0
             and accelerator.is_local_main_process
         ):
-            wandb_log("train", {"loss": torch.mean(losses).item()})
+            last_loss = torch.mean(torch.tensor(losses)).item()
+            wandb_log("train", {"loss": last_loss}, print_log=False)
+        if (
+            training_args.do_save
+            and global_step > 0
+            and global_step % training_args.save_every_n_steps == 0
+            and accelerator.is_local_main_process
+        ):
+            # use wandb run id as checkpoint name
+            checkpoint_name = wandb.run.name.strip()
+            if len(checkpoint_name) == 0:
+                checkpoint_name = wandb.run.id
+            checkpoint_path = (
+                Path(training_args.checkpoint_path)
+                / checkpoint_name
+                / f"step_{global_step}"
+            )
+            model.save_model(checkpoint_path, onnx=training_args.save_onnx)
+            if training_args.do_push_to_hub:
+                model.save_and_push_to_hub(
+                    training_args.hub_repo,
+                    checkpoint_path,
+                    onnx=training_args.save_onnx,
+                )
+        if training_args.n_steps is not None and global_step >= training_args.n_steps:
+            return
+        if (
+            training_args.eval_every_n_steps is not None
+            and global_step > 0
+            and global_step % training_args.eval_every_n_steps == 0
+            and accelerator.is_local_main_process
+        ):
+            if training_args.do_full_eval:
+                evaluate()
+            else:
+                evaluate_loss_only()
+            console.rule(f"Epoch {epoch}")
         step += 1
+        global_step += 1
+        if accelerator.is_local_main_process:
+            pbar.update(1)
+            if last_loss is not None:
+                pbar.set_postfix({"loss": f"{last_loss:.3f}"})
 
 
 def evaluate():
     model.eval()
     y_true = []
     y_pred = []
-    for batch in tqdm(val_dl, desc="Step"):
+    losses = []
+    console.rule("Evaluation")
+    for batch in val_dl:
         y = model(batch["image"])
+        loss = torch.nn.functional.cross_entropy(y, batch["target"])
+        losses.append(loss.detach())
         y_true.append(batch["target"].cpu().numpy())
         y_pred.append(y.argmax(-1).cpu().numpy())
     y_true = np.concatenate(y_true)
     y_pred = np.concatenate(y_pred)
+    wandb_log("val", {"loss": torch.mean(torch.tensor(losses)).item()})
     acc = accuracy_score(y_true, y_pred)
     f1 = f1_score(y_true, y_pred, average="macro")
-    precision = precision_score(y_true, y_pred, average="macro")
+    precision = precision_score(y_true, y_pred, average="macro", zero_division=0)
     recall = recall_score(y_true, y_pred, average="macro")
     wandb_log("val", {"acc": acc, "f1": f1, "precision": precision, "recall": recall})
 
 
+def evaluate_loss_only():
+    model.eval()
+    losses = []
+    console.rule("Evaluation")
+    for batch in val_dl:
+        y = model(batch["image"])
+        loss = torch.nn.functional.cross_entropy(y, batch["target"])
+        losses.append(loss.detach())
+    wandb_log("val", {"loss": torch.mean(torch.tensor(losses)).item()})
+
+
 def main():
-    global accelerator, training_args, model_args, train_dl, val_dl, optimizer, scheduler, model
+    global accelerator, training_args, model_args, train_dl, val_dl, optimizer, scheduler, model, global_step, pbar
+
+    global_step = 0
 
     parser = HfArgumentParser([TrainingArgs, ModelArgs])
 
@@ -167,11 +229,54 @@ def main():
         model, optimizer, train_dl, val_dl, scheduler
     )
 
-    # train
-    console.rule("Training")
-    for epoch in tqdm(range(training_args.n_epochs), desc="Epoch"):
-        train_epoch()
+    # train/eval
+    if training_args.eval_only:
+        console.rule("Evaluation")
         evaluate()
+        return
+
+    console.rule("Training")
+    if training_args.n_steps is not None and training_args.n_epochs is not None:
+        raise ValueError("n_steps and n_epochs are mutually exclusive")
+    if training_args.n_steps is not None:
+        pbar_total = training_args.n_steps
+        training_args.n_epochs = training_args.n_steps // len(train_dl) + 1
+    else:
+        pbar_total = len(train_dl) * training_args.n_epochs
+    if (
+        training_args.eval_every_n_epochs is not None
+        and training_args.eval_every_n_steps is not None
+    ):
+        raise ValueError(
+            "eval_every_n_epochs and eval_every_n_steps are mutually exclusive"
+        )
+    if training_args.eval_every_n_epochs is not None:
+        training_args.eval_every_n_steps = training_args.eval_every_n_epochs * len(
+            train_dl
+        )
+    pbar = tqdm(total=pbar_total, desc="step")
+    for i in range(training_args.n_epochs):
+        train_epoch(i)
+    if training_args.do_save:
+        # use wandb run id as checkpoint name
+        checkpoint_name = wandb.run.name.strip()
+        if len(checkpoint_name) == 0:
+            checkpoint_name = wandb.run.id
+        checkpoint_path = (
+            Path(training_args.checkpoint_path) / checkpoint_name / "final"
+        )
+        model.save_model(checkpoint_path, onnx=training_args.save_onnx)
+        if training_args.do_push_to_hub:
+            model.save_and_push_to_hub(
+                training_args.hub_repo, checkpoint_path, onnx=training_args.save_onnx
+            )
+
+    # wandb sync reminder
+    if accelerator.is_local_main_process and training_args.wandb_mode == "offline":
+        console.rule("Weights & Biases")
+        console.print(
+            f"use \n[magenta]wandb sync {Path(wandb.run.dir).parent}[/magenta]\nto sync offline run"
+        )
 
 
 if __name__ == "__main__":
