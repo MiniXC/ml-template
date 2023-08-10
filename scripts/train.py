@@ -1,12 +1,15 @@
 import sys
 import os
-sys.path.append('./') # add current directory to path
+
+sys.path.append(".")  # add root of project to path
 
 # torch & hf
 import torch
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from transformers import get_linear_schedule_with_warmup, HfArgumentParser
+from datasets import load_dataset
+
 # from datasets import load_dataset
 
 # plotting, logging & etc
@@ -22,12 +25,15 @@ from pathlib import Path
 import yaml
 from rich.console import Console
 from rich.prompt import Prompt
+
 console = Console()
 
 # local imports
 from configs.args import TrainingArgs, ModelArgs
 from util.remote import wandb_update_config, wandb_init
 from model.simple_mlp import SimpleMLP
+from collators import get_collator
+
 
 def epoch(
     dataloader,
@@ -39,11 +45,13 @@ def epoch(
     model.train()
     losses = deque()
 
+
 def evaluate(
     dataloader,
     model,
 ):
     pass
+
 
 def main():
     parser = HfArgumentParser([TrainingArgs, ModelArgs])
@@ -66,17 +74,47 @@ def main():
     wandb_init(wandb_name, wandb_project, wandb_dir, wandb_mode)
 
     # log args
-    console.rule('Arguments')
+    console.rule("Arguments")
     console.print(training_args)
     console.print(model_args)
-    wandb_update_config({
-        "training": training_args,
-        "model": model_args,
-    })
+    wandb_update_config(
+        {
+            "training": training_args,
+            "model": model_args,
+        }
+    )
 
     # model
     model = SimpleMLP(model_args)
-    model.save_model(Path(training_args.checkpoint_path) / 'test')
+    model.save_model(Path(training_args.checkpoint_path) / "test")
+
+    train_collator = get_collator(training_args.train_collator)
+    val_collator = get_collator(training_args.val_collator)
+
+    # dataset
+    console.rule("Dataset")
+    train_ds = load_dataset(training_args.dataset, split=training_args.train_split)
+    val_ds = load_dataset(training_args.dataset, split=training_args.val_split)
+
+    # dataloader
+    train_dl = DataLoader(
+        train_ds,
+        batch_size=training_args.batch_size,
+        shuffle=True,
+        collate_fn=train_collator,
+    )
+
+    val_dl = DataLoader(
+        val_ds,
+        batch_size=training_args.batch_size,
+        shuffle=False,
+        collate_fn=val_collator,
+    )
+
+    for item in train_dl:
+        print(item)
+        break
+
 
 if __name__ == "__main__":
     main()

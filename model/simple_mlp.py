@@ -5,9 +5,13 @@ import yaml
 import torch
 from torch import nn
 from transformers.utils.hub import cached_file
+from rich.console import Console
+
+console = Console()
 
 from configs.args import ModelArgs
 from scripts.util.remote import push_to_hub
+
 
 class SimpleMLP(nn.Module):
     def __init__(
@@ -16,13 +20,19 @@ class SimpleMLP(nn.Module):
     ):
         super().__init__()
 
-        self.mlp = nn.Sequential(OrderedDict([
-            ("layer_in_linear", nn.Linear(1, args.hidden_dim)),
-            ("layer_in_gelu", nn.GELU()),
-        ]))
+        self.mlp = nn.Sequential(
+            OrderedDict(
+                [
+                    ("layer_in_linear", nn.Linear(1, args.hidden_dim)),
+                    ("layer_in_gelu", nn.GELU()),
+                ]
+            )
+        )
 
         for n in range(args.n_layers):
-            self.mlp.add_module(f"layer_{n}_linear", nn.Linear(args.hidden_dim, args.hidden_dim))
+            self.mlp.add_module(
+                f"layer_{n}_linear", nn.Linear(args.hidden_dim, args.hidden_dim)
+            )
             self.mlp.add_module(f"layer_{n}_gelu", nn.GELU())
 
         self.mlp.add_module("layer_out_linear", nn.Linear(args.hidden_dim, 1))
@@ -41,6 +51,10 @@ class SimpleMLP(nn.Module):
 
     def save_and_push_to_hub(self, path):
         self.save_model(path)
+        try:
+            self.export_onnx(path / "model.onnx")
+        except Exception as e:
+            console.print(f"[red]Skipping ONNX export[/red]: {e}")
         return push_to_hub(path)
 
     @staticmethod
@@ -57,3 +71,24 @@ class SimpleMLP(nn.Module):
         model = SimpleMLP(args)
         model.load_state_dict(torch.load(model_file))
         return model
+
+    @property
+    def dummy_input(self):
+        torch.manual_seed(0)
+        return torch.randn(1, 1)
+
+    def export_onnx(self, path):
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        torch.onnx.export(
+            self,
+            self.dummy_input,
+            path / "model.onnx",
+            input_names=["input"],
+            output_names=["output"],
+            dynamic_axes={
+                "input": {0: "batch_size"},
+                "output": {0: "batch_size"},
+            },
+            opset_version=11,
+        )
