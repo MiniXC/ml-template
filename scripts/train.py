@@ -10,6 +10,7 @@ from transformers import get_linear_schedule_with_warmup, HfArgumentParser
 from datasets import load_dataset
 
 # plotting, logging & etc
+from torchinfo import summary
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -21,6 +22,7 @@ from collections import deque
 from pathlib import Path
 import yaml
 from rich.console import Console
+from rich.prompt import Prompt
 
 console = Console()
 
@@ -32,8 +34,18 @@ from model.simple_mlp import SimpleMLP
 from collators import get_collator
 
 
+def console_print(*args, **kwargs):
+    if accelerator.is_main_process:
+        console.print(*args, **kwargs)
+
+
+def console_rule(*args, **kwargs):
+    if accelerator.is_main_process:
+        console.rule(*args, **kwargs)
+
+
 def wandb_log(prefix, log_dict, round_n=3, print_log=True):
-    if accelerator.is_local_main_process:
+    if accelerator.is_main_process:
         log_dict = {f"{prefix}/{k}": v for k, v in log_dict.items()}
         wandb.log(log_dict, step=global_step)
         if print_log:
@@ -48,17 +60,14 @@ def seed_everything(seed):
 
 
 def save_checkpoint():
-    if accelerator.is_local_main_process:
-        checkpoint_name = wandb.run.name.strip()
-        if len(checkpoint_name) == 0:
-            checkpoint_name = wandb.run.id
-        checkpoint_path = (
-            Path(training_args.checkpoint_path)
-            / checkpoint_name
-            / f"step_{global_step}"
-        )
-        # model
-        model.save_model(checkpoint_path, onnx=training_args.save_onnx)
+    accelerator.wait_for_everyone()
+    checkpoint_name = training_args.run_name
+    checkpoint_path = (
+        Path(training_args.checkpoint_path) / checkpoint_name / f"step_{global_step}"
+    )
+    # model
+    model.save_model(checkpoint_path, accelerator, onnx=training_args.save_onnx)
+    if accelerator.is_main_process:
         # training args
         with open(checkpoint_path / "training_args.yml", "w") as f:
             f.write(yaml.dump(training_args.__dict__, Dumper=yaml.Dumper))
@@ -71,6 +80,7 @@ def save_checkpoint():
                 checkpoint_path,
                 commit_message=f"step {global_step}",
             )
+    accelerator.wait_for_everyone()
 
 
 def train_epoch(epoch):
@@ -78,21 +88,24 @@ def train_epoch(epoch):
     model.train()
     losses = deque(maxlen=training_args.log_every_n_steps)
     step = 0
-    console.rule(f"Epoch {epoch}")
+    console_rule(f"Epoch {epoch}")
     last_loss = None
     for batch in train_dl:
-        y = model(batch["image"])
-        loss = torch.nn.functional.cross_entropy(y, batch["target"])
-        accelerator.backward(loss)
-        accelerator.clip_grad_norm_(model.parameters(), training_args.gradient_clip_val)
-        optimizer.step()
-        scheduler.step()
-        optimizer.zero_grad()
+        with accelerator.accumulate(model):
+            y = model(batch["image"])
+            loss = torch.nn.functional.cross_entropy(y, batch["target"])
+            accelerator.backward(loss)
+            accelerator.clip_grad_norm_(
+                model.parameters(), training_args.gradient_clip_val
+            )
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
         losses.append(loss.detach())
         if (
             step > 0
             and step % training_args.log_every_n_steps == 0
-            and accelerator.is_local_main_process
+            and accelerator.is_main_process
         ):
             last_loss = torch.mean(torch.tensor(losses)).item()
             wandb_log("train", {"loss": last_loss}, print_log=False)
@@ -108,16 +121,16 @@ def train_epoch(epoch):
             training_args.eval_every_n_steps is not None
             and global_step > 0
             and global_step % training_args.eval_every_n_steps == 0
-            and accelerator.is_local_main_process
+            and accelerator.is_main_process
         ):
             if training_args.do_full_eval:
                 evaluate()
             else:
                 evaluate_loss_only()
-            console.rule(f"Epoch {epoch}")
+            console_rule(f"Epoch {epoch}")
         step += 1
         global_step += 1
-        if accelerator.is_local_main_process:
+        if accelerator.is_main_process:
             pbar.update(1)
             if last_loss is not None:
                 pbar.set_postfix({"loss": f"{last_loss:.3f}"})
@@ -128,7 +141,7 @@ def evaluate():
     y_true = []
     y_pred = []
     losses = []
-    console.rule("Evaluation")
+    console_rule("Evaluation")
     for batch in val_dl:
         y = model(batch["image"])
         loss = torch.nn.functional.cross_entropy(y, batch["target"])
@@ -148,7 +161,7 @@ def evaluate():
 def evaluate_loss_only():
     model.eval()
     losses = []
-    console.rule("Evaluation")
+    console_rule("Evaluation")
     for batch in val_dl:
         y = model(batch["image"])
         loss = torch.nn.functional.cross_entropy(y, batch["target"])
@@ -169,7 +182,24 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1].endswith(".yml"):
         with open(sys.argv[1], "r") as f:
             args_dict = yaml.load(f, Loader=yaml.Loader)
-        (training_args, model_args, collator_args) = parser.parse_dict(args_dict)
+        # additonally parse args from command line
+        (
+            training_args,
+            model_args,
+            collator_args,
+        ) = parser.parse_args_into_dataclasses(sys.argv[2:])
+        # update args from yaml
+        for k, v in args_dict.items():
+            if hasattr(training_args, k):
+                setattr(training_args, k, v)
+            if hasattr(model_args, k):
+                setattr(model_args, k, v)
+            if hasattr(collator_args, k):
+                setattr(collator_args, k, v)
+        if len(sys.argv) > 2:
+            console_print(
+                f"[yellow]WARNING[/yellow]: yaml args will be override command line args"
+            )
     else:
         (
             training_args,
@@ -177,46 +207,70 @@ def main():
             collator_args,
         ) = parser.parse_args_into_dataclasses()
 
+    # check if run name is specified
+    if training_args.run_name is None:
+        raise ValueError("run_name must be specified")
+    if (
+        training_args.do_save
+        and Path(training_args.checkpoint_path / training_args.run_name).exists()
+    ):
+        raise ValueError(f"run_name {training_args.run_name} already exists")
+
     # wandb
-    wandb_name, wandb_project, wandb_dir, wandb_mode = (
-        training_args.wandb_name,
-        training_args.wandb_project,
-        training_args.wandb_dir,
-        training_args.wandb_mode,
-    )
-    wandb_init(wandb_name, wandb_project, wandb_dir, wandb_mode)
-    wandb.run.log_code()
+    if accelerator.is_main_process:
+        wandb_name, wandb_project, wandb_dir, wandb_mode = (
+            training_args.run_name,
+            training_args.wandb_project,
+            training_args.wandb_dir,
+            training_args.wandb_mode,
+        )
+        wandb_init(wandb_name, wandb_project, wandb_dir, wandb_mode)
+        wandb.run.log_code()
 
     # log args
-    console.rule("Arguments")
-    console.print(training_args)
-    console.print(model_args)
-    console.print(collator_args)
-    wandb_update_config(
-        {
-            "training": training_args,
-            "model": model_args,
-        }
-    )
+    console_rule("Arguments")
+    console_print(training_args)
+    console_print(model_args)
+    console_print(collator_args)
+    if accelerator.is_main_process:
+        wandb_update_config(
+            {
+                "training": training_args,
+                "model": model_args,
+            }
+        )
     validate_args(training_args, model_args, collator_args)
+
+    # Distribution Information
+    console_rule("Distribution Information")
+    console_print(f"[green]accelerator[/green]: {accelerator}")
+    console_print(f"[green]n_procs[/green]: {accelerator.num_processes}")
+    console_print(f"[green]process_index[/green]: {accelerator.process_index}")
 
     # model
     model = SimpleMLP(model_args)
+    console_rule("Model")
+    dummy_shape = list(model.dummy_input.shape)
+    dummy_shape[0] = training_args.batch_size
+    dummy_shape = tuple(dummy_shape)
+    console_print(f"[green]input shape[/green]: {dummy_shape}")
+    model_summary = summary(model, input_size=dummy_shape, verbose=0)
+    console_print(model_summary)
 
     collator = get_collator(collator_args)
 
     # dataset
-    console.rule("Dataset")
+    console_rule("Dataset")
 
-    console.print(f"[green]dataset[/green]: {training_args.dataset}")
-    console.print(f"[green]train_split[/green]: {training_args.train_split}")
-    console.print(f"[green]val_split[/green]: {training_args.val_split}")
+    console_print(f"[green]dataset[/green]: {training_args.dataset}")
+    console_print(f"[green]train_split[/green]: {training_args.train_split}")
+    console_print(f"[green]val_split[/green]: {training_args.val_split}")
 
     train_ds = load_dataset(training_args.dataset, split=training_args.train_split)
     val_ds = load_dataset(training_args.dataset, split=training_args.val_split)
 
-    console.print(f"[green]train[/green]: {len(train_ds)}")
-    console.print(f"[green]val[/green]: {len(val_ds)}")
+    console_print(f"[green]train[/green]: {len(train_ds)}")
+    console_print(f"[green]val[/green]: {len(val_ds)}")
 
     # dataloader
     train_dl = DataLoader(
@@ -224,6 +278,7 @@ def main():
         batch_size=training_args.batch_size,
         shuffle=True,
         collate_fn=collator,
+        drop_last=True,
     )
 
     val_dl = DataLoader(
@@ -251,51 +306,38 @@ def main():
         model, optimizer, train_dl, val_dl, scheduler
     )
 
-    # train/eval
+    # evaluation
     if training_args.eval_only:
-        console.rule("Evaluation")
+        console_rule("Evaluation")
         seed_everything(training_args.seed)
         evaluate()
         return
 
-    console.rule("Training")
+    # training
+    console_rule("Training")
     seed_everything(training_args.seed)
     pbar_total = training_args.n_steps
     training_args.n_epochs = training_args.n_steps // len(train_dl) + 1
-    console.print(f"[green]n_epochs[/green]: {training_args.n_epochs}")
+    console_print(f"[green]n_epochs[/green]: {training_args.n_epochs}")
+    console_print(
+        f"[green]effective_batch_size[/green]: {training_args.batch_size*accelerator.num_processes}"
+    )
     pbar = tqdm(total=pbar_total, desc="step")
     for i in range(training_args.n_epochs):
         train_epoch(i)
-    console.rule("Evaluation")
+    console_rule("Evaluation")
     seed_everything(training_args.seed)
     evaluate()
 
     # save final model
-    console.rule("Saving")
+    console_rule("Saving")
     if training_args.do_save:
-        # use wandb run id as checkpoint name
-        checkpoint_name = wandb.run.name.strip()
-        if len(checkpoint_name) == 0:
-            checkpoint_name = wandb.run.id
-        checkpoint_path = (
-            Path(training_args.checkpoint_path) / checkpoint_name / "final"
-        )
-        console.print(f"saving final model to [magenta]{checkpoint_path}[/magenta]")
-        model.save_model(checkpoint_path, onnx=training_args.save_onnx)
-        if training_args.push_to_hub:
-            console.print(
-                f"pushing final model to [magenta]{training_args.hub_repo}[/magenta]"
-            )
-            push_to_hub(
-                training_args.hub_repo,
-                checkpoint_path,
-                commit_message=f"final model (step {global_step})",
-            )
+        save_checkpoint()
 
     # wandb sync reminder
-    if accelerator.is_local_main_process and training_args.wandb_mode == "offline":
-        console.rule("Weights & Biases")
-        console.print(
+    if accelerator.is_main_process and training_args.wandb_mode == "offline":
+        console_rule("Weights & Biases")
+        console_print(
             f"use \n[magenta]wandb sync {Path(wandb.run.dir).parent}[/magenta]\nto sync offline run"
         )
 

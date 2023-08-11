@@ -43,10 +43,13 @@ class SimpleMLP(nn.Module):
     def forward(self, x):
         return self.mlp(x)
 
-    def save_model(self, path, onnx=False):
+    def save_model(self, path, accelerator=None, onnx=False):
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
-        torch.save(self.state_dict(), path / "pytorch_model.bin")
+        if accelerator is not None:
+            accelerator.save_model(self, path)
+        else:
+            torch.save(self.state_dict(), path / "pytorch_model.bin")
         if onnx:
             try:
                 self.export_onnx(path / "model.onnx")

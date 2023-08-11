@@ -13,8 +13,6 @@ def validate_args(*args):
             if arg.wandb_mode == "online":
                 if arg.wandb_project is None:
                     raise ValueError("wandb_project must be specified")
-                if arg.wandb_name is None:
-                    raise ValueError("wandb_name must be specified")
             if arg.push_to_hub:
                 if arg.hub_repo is None:
                     raise ValueError("hub_repo must be specified")

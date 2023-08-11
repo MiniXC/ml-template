@@ -9,7 +9,7 @@ class TrainingArgs:
     gradient_clip_val: float = 1.0
     checkpoint_path: str = "checkpoints"
     output_path: str = "outputs"
-    wandb_name: str = None
+    run_name: str = None
     wandb_mode: str = "offline"
     wandb_project: str = None
     wandb_dir: str = "wandb"
