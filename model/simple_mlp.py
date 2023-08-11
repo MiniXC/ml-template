@@ -52,29 +52,17 @@ class SimpleMLP(nn.Module):
                 self.export_onnx(path / "model.onnx")
             except Exception as e:
                 console.print(f"[red]Skipping ONNX export[/red]: {e}")
-        with open(path / "config.yml", "w") as f:
+        with open(path / "model_config.yml", "w") as f:
             f.write(yaml.dump(self.args.__dict__, Dumper=yaml.Dumper))
-
-    def save_and_push_to_hub(self, repo, path, onnx=False):
-        self.save_model(path)
-        if onnx:
-            try:
-                self.export_onnx(path / "model.onnx")
-            except Exception as e:
-                console.print(f"[red]Skipping ONNX export[/red]: {e}")
-        token = os.getenv("HUGGING_FACE_HUB_TOKEN", default=None)
-        if token is None:
-            raise ValueError("$HUGGING_FACE_HUB_TOKEN is not set")
-        return push_to_hub(repo, path, token)
 
     @staticmethod
     def from_pretrained(path_or_hubid):
         path = Path(path_or_hubid)
         if path.exists():
-            config_file = path / "config.yml"
+            config_file = path / "model_config.yml"
             model_file = path / "pytorch_model.bin"
         else:
-            config_file = cached_file(path_or_hubid, "config.yml")
+            config_file = cached_file(path_or_hubid, "model_config.yml")
             model_file = cached_file(path_or_hubid, "pytorch_model.bin")
         args = yaml.load(open(config_file, "r"), Loader=yaml.Loader)
         args = ModelArgs(**args)

@@ -6,6 +6,7 @@ class TrainingArgs:
     lr: float = 1e-4
     lr_schedule: str = "linear_with_warmup"
     lr_warmup_steps: int = 1000
+    gradient_clip_val: float = 1.0
     checkpoint_path: str = "checkpoints"
     output_path: str = "outputs"
     wandb_name: str = None
@@ -14,12 +15,10 @@ class TrainingArgs:
     wandb_dir: str = "wandb"
     train_split: str = "train"
     val_split: str = "test"
-    n_steps: int = None
+    n_steps: int = 10000
     batch_size: int = 32
     seed: int = 0
     dataset: str = "mnist"
-    train_collator: str = "default"
-    val_collator: str = "default"
     log_every_n_steps: int = 100
     do_full_eval: bool = True
     do_save: bool = True
@@ -27,8 +26,15 @@ class TrainingArgs:
     eval_only: bool = False
     eval_every_n_steps: int = 1000
     save_every_n_steps: int = 1000
-    do_push_to_hub: bool = False
+    push_to_hub: bool = False
     hub_repo: str = None
+
+
+@dataclass
+class CollatorArgs:
+    normalize: bool = True
+    onehot: bool = True
+    name: str = "default"
 
 
 @dataclass

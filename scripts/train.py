@@ -17,28 +17,60 @@ import wandb
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from tqdm.auto import tqdm
-from collections import defaultdict, deque
+from collections import deque
 from pathlib import Path
 import yaml
 from rich.console import Console
-from rich.prompt import Prompt
 
 console = Console()
 
 # local imports
-from configs.args import TrainingArgs, ModelArgs
-from util.remote import wandb_update_config, wandb_init
+from configs.args import TrainingArgs, ModelArgs, CollatorArgs
+from configs.validation import validate_args
+from util.remote import wandb_update_config, wandb_init, push_to_hub
 from model.simple_mlp import SimpleMLP
 from collators import get_collator
 
 
 def wandb_log(prefix, log_dict, round_n=3, print_log=True):
-    log_dict = {f"{prefix}/{k}": v for k, v in log_dict.items()}
     if accelerator.is_local_main_process:
+        log_dict = {f"{prefix}/{k}": v for k, v in log_dict.items()}
         wandb.log(log_dict, step=global_step)
         if print_log:
             log_dict = {k: round(v, round_n) for k, v in log_dict.items()}
             console.log(log_dict)
+
+
+def seed_everything(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+
+
+def save_checkpoint():
+    if accelerator.is_local_main_process:
+        checkpoint_name = wandb.run.name.strip()
+        if len(checkpoint_name) == 0:
+            checkpoint_name = wandb.run.id
+        checkpoint_path = (
+            Path(training_args.checkpoint_path)
+            / checkpoint_name
+            / f"step_{global_step}"
+        )
+        # model
+        model.save_model(checkpoint_path, onnx=training_args.save_onnx)
+        # training args
+        with open(checkpoint_path / "training_args.yml", "w") as f:
+            f.write(yaml.dump(training_args.__dict__, Dumper=yaml.Dumper))
+        # collator args
+        with open(checkpoint_path / "collator_args.yml", "w") as f:
+            f.write(yaml.dump(collator_args.__dict__, Dumper=yaml.Dumper))
+        if training_args.push_to_hub:
+            push_to_hub(
+                training_args.hub_repo,
+                checkpoint_path,
+                commit_message=f"step {global_step}",
+            )
 
 
 def train_epoch(epoch):
@@ -52,6 +84,7 @@ def train_epoch(epoch):
         y = model(batch["image"])
         loss = torch.nn.functional.cross_entropy(y, batch["target"])
         accelerator.backward(loss)
+        accelerator.clip_grad_norm_(model.parameters(), training_args.gradient_clip_val)
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
@@ -67,24 +100,8 @@ def train_epoch(epoch):
             training_args.do_save
             and global_step > 0
             and global_step % training_args.save_every_n_steps == 0
-            and accelerator.is_local_main_process
         ):
-            # use wandb run id as checkpoint name
-            checkpoint_name = wandb.run.name.strip()
-            if len(checkpoint_name) == 0:
-                checkpoint_name = wandb.run.id
-            checkpoint_path = (
-                Path(training_args.checkpoint_path)
-                / checkpoint_name
-                / f"step_{global_step}"
-            )
-            model.save_model(checkpoint_path, onnx=training_args.save_onnx)
-            if training_args.do_push_to_hub:
-                model.save_and_push_to_hub(
-                    training_args.hub_repo,
-                    checkpoint_path,
-                    onnx=training_args.save_onnx,
-                )
+            save_checkpoint()
         if training_args.n_steps is not None and global_step >= training_args.n_steps:
             return
         if (
@@ -140,11 +157,11 @@ def evaluate_loss_only():
 
 
 def main():
-    global accelerator, training_args, model_args, train_dl, val_dl, optimizer, scheduler, model, global_step, pbar
+    global accelerator, training_args, model_args, collator_args, train_dl, val_dl, optimizer, scheduler, model, global_step, pbar
 
     global_step = 0
 
-    parser = HfArgumentParser([TrainingArgs, ModelArgs])
+    parser = HfArgumentParser([TrainingArgs, ModelArgs, CollatorArgs])
 
     accelerator = Accelerator()
 
@@ -152,9 +169,13 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1].endswith(".yml"):
         with open(sys.argv[1], "r") as f:
             args_dict = yaml.load(f, Loader=yaml.Loader)
-        (training_args, model_args) = parser.parse_dict(args_dict)
+        (training_args, model_args, collator_args) = parser.parse_dict(args_dict)
     else:
-        (training_args, model_args) = parser.parse_args_into_dataclasses()
+        (
+            training_args,
+            model_args,
+            collator_args,
+        ) = parser.parse_args_into_dataclasses()
 
     # wandb
     wandb_name, wandb_project, wandb_dir, wandb_mode = (
@@ -170,18 +191,19 @@ def main():
     console.rule("Arguments")
     console.print(training_args)
     console.print(model_args)
+    console.print(collator_args)
     wandb_update_config(
         {
             "training": training_args,
             "model": model_args,
         }
     )
+    validate_args(training_args, model_args, collator_args)
 
     # model
     model = SimpleMLP(model_args)
 
-    train_collator = get_collator(training_args.train_collator)
-    val_collator = get_collator(training_args.val_collator)
+    collator = get_collator(collator_args)
 
     # dataset
     console.rule("Dataset")
@@ -201,14 +223,14 @@ def main():
         train_ds,
         batch_size=training_args.batch_size,
         shuffle=True,
-        collate_fn=train_collator,
+        collate_fn=collator,
     )
 
     val_dl = DataLoader(
         val_ds,
         batch_size=training_args.batch_size,
         shuffle=False,
-        collate_fn=val_collator,
+        collate_fn=collator,
     )
 
     # optimizer
@@ -232,16 +254,24 @@ def main():
     # train/eval
     if training_args.eval_only:
         console.rule("Evaluation")
+        seed_everything(training_args.seed)
         evaluate()
         return
 
     console.rule("Training")
+    seed_everything(training_args.seed)
     pbar_total = training_args.n_steps
     training_args.n_epochs = training_args.n_steps // len(train_dl) + 1
     console.print(f"[green]n_epochs[/green]: {training_args.n_epochs}")
     pbar = tqdm(total=pbar_total, desc="step")
     for i in range(training_args.n_epochs):
         train_epoch(i)
+    console.rule("Evaluation")
+    seed_everything(training_args.seed)
+    evaluate()
+
+    # save final model
+    console.rule("Saving")
     if training_args.do_save:
         # use wandb run id as checkpoint name
         checkpoint_name = wandb.run.name.strip()
@@ -250,10 +280,16 @@ def main():
         checkpoint_path = (
             Path(training_args.checkpoint_path) / checkpoint_name / "final"
         )
+        console.print(f"saving final model to [magenta]{checkpoint_path}[/magenta]")
         model.save_model(checkpoint_path, onnx=training_args.save_onnx)
-        if training_args.do_push_to_hub:
-            model.save_and_push_to_hub(
-                training_args.hub_repo, checkpoint_path, onnx=training_args.save_onnx
+        if training_args.push_to_hub:
+            console.print(
+                f"pushing final model to [magenta]{training_args.hub_repo}[/magenta]"
+            )
+            push_to_hub(
+                training_args.hub_repo,
+                checkpoint_path,
+                commit_message=f"final model (step {global_step})",
             )
 
     # wandb sync reminder

@@ -4,7 +4,7 @@ import tempfile
 import shutil
 
 import wandb
-from huggingface_hub import Repository, create_repo
+from huggingface_hub import Repository, create_repo, HfApi
 import huggingface_hub
 from rich.prompt import Prompt
 from rich.console import Console
@@ -49,11 +49,16 @@ def wandb_init(wandb_name, wandb_project, wandb_dir, wandb_mode):
     os.environ["WANDB_SILENT"] = "false"
 
 
-def push_to_hub(repo_name, checkpoint_dir, hub_token, commit_message="update model"):
+def push_to_hub(repo_name, checkpoint_dir, commit_message="update model"):
+    hub_token = os.getenv("HUGGING_FACE_HUB_TOKEN", default=None)
+    if hub_token is None:
+        console.log("no hub token found")
+        raise ValueError("$HUGGING_FACE_HUB_TOKEN is not set")
     try:
         create_repo(repo_name, token=hub_token)
     except huggingface_hub.utils._errors.HfHubHTTPError:
         console.print(f"[magenta]{repo_name}[/magenta] already exists")
+    repo_name = HfApi().get_full_repo_name(repo_name)
     temp_dict = {}
     console.print(
         f"pushing [magenta]{checkpoint_dir}[/magenta] to [magenta]{repo_name}[/magenta]"
