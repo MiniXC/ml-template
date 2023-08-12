@@ -5,6 +5,7 @@
 checkpoints/
 outputs/
 wandb/
+.vscode/
 
 #####################
 # Python            #

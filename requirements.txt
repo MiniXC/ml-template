@@ -1,4 +1,5 @@
 torchinfo==1.8.0
+torchview==0.2.6
 accelerate==0.21.0
 transformers==4.31.0
 datasets==2.14.4
@@ -15,3 +16,4 @@ huggingface_hub==0.16.4
 pytest==7.4.0
 onnx==1.14.0
 onnxruntime==1.15.1
+graphviz==0.20.1

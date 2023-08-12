@@ -8,3 +8,10 @@ It's quite opinionated in the following (and probably more) ways:
 - assumes one is always using a huggingface dataset (this can also be done using ``load_dataset('some_dataset.py')``)
 - uses collators as the main way to process data that hasn't been preprocessed by the dataset
 - uses separate configs for training (everything not shipped with the model), model and collator
+
+## architecture
+The following updates automatically every time ``scripts/train.py`` is run.
+<details>
+<summary>Click to expand</summary>
+<img src="./figures/model.gv.png"></img>
+</details>

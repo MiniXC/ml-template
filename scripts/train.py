@@ -1,4 +1,7 @@
+import os
 import sys
+from collections import deque
+from pathlib import Path
 
 sys.path.append(".")  # add root of project to path
 
@@ -9,20 +12,20 @@ from accelerate import Accelerator
 from transformers import get_linear_schedule_with_warmup, HfArgumentParser
 from datasets import load_dataset
 
-# plotting, logging & etc
+# logging & etc
 from torchinfo import summary
-import seaborn as sns
-import matplotlib.pyplot as plt
-import pandas as pd
+from torchview import draw_graph
 import wandb
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from tqdm.auto import tqdm
-from collections import deque
-from pathlib import Path
 import yaml
 from rich.console import Console
-from rich.prompt import Prompt
+
+# dataframes and plotting
+# import seaborn as sns
+# import matplotlib.pyplot as plt
+# import pandas as pd
 
 console = Console()
 
@@ -32,6 +35,24 @@ from configs.validation import validate_args
 from util.remote import wandb_update_config, wandb_init, push_to_hub
 from model.simple_mlp import SimpleMLP
 from collators import get_collator
+
+
+def print_and_draw_model():
+    dummy_shape = list(model.dummy_input.shape)
+    dummy_shape[0] = training_args.batch_size
+    dummy_shape = tuple(dummy_shape)
+    console_print(f"[green]input shape[/green]: {dummy_shape}")
+    model_summary = summary(model, input_size=dummy_shape, verbose=0)
+    console_print(model_summary)
+    if accelerator.is_main_process:
+        dummy_input = model.dummy_input
+        # repeat dummy input to match batch size (regardless of how many dimensions)
+        dummy_input = dummy_input.repeat(
+            (training_args.batch_size,) + (1,) * (len(dummy_input.shape) - 1)
+        )
+        model_graph = draw_graph(
+            model, input_data=dummy_input, save_graph=True, directory="figures/"
+        )
 
 
 def console_print(*args, **kwargs):
@@ -212,7 +233,7 @@ def main():
         raise ValueError("run_name must be specified")
     if (
         training_args.do_save
-        and Path(training_args.checkpoint_path / training_args.run_name).exists()
+        and (Path(training_args.checkpoint_path) / training_args.run_name).exists()
     ):
         raise ValueError(f"run_name {training_args.run_name} already exists")
 
@@ -250,12 +271,7 @@ def main():
     # model
     model = SimpleMLP(model_args)
     console_rule("Model")
-    dummy_shape = list(model.dummy_input.shape)
-    dummy_shape[0] = training_args.batch_size
-    dummy_shape = tuple(dummy_shape)
-    console_print(f"[green]input shape[/green]: {dummy_shape}")
-    model_summary = summary(model, input_size=dummy_shape, verbose=0)
-    console_print(model_summary)
+    print_and_draw_model()
 
     collator = get_collator(collator_args)
 
