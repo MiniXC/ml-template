@@ -38,18 +38,24 @@ from collators import get_collator
 
 
 def print_and_draw_model():
-    dummy_shape = list(model.dummy_input.shape)
-    dummy_shape[0] = training_args.batch_size
-    dummy_shape = tuple(dummy_shape)
-    console_print(f"[green]input shape[/green]: {dummy_shape}")
-    model_summary = summary(model, input_size=dummy_shape, verbose=0)
+    dummy_input = model.dummy_input
+    # repeat dummy input to match batch size (regardless of how many dimensions)
+    dummy_input = dummy_input.repeat(
+        (training_args.batch_size,) + (1,) * (len(dummy_input.shape) - 1)
+    )
+    console_print(f"[green]input shape[/green]: {dummy_input.shape}")
+    model_summary = summary(
+        model,
+        input_data=dummy_input,
+        verbose=0,
+        col_names=[
+            "input_size",
+            "output_size",
+            "num_params",
+        ],
+    )
     console_print(model_summary)
     if accelerator.is_main_process:
-        dummy_input = model.dummy_input
-        # repeat dummy input to match batch size (regardless of how many dimensions)
-        dummy_input = dummy_input.repeat(
-            (training_args.batch_size,) + (1,) * (len(dummy_input.shape) - 1)
-        )
         model_graph = draw_graph(
             model, input_data=dummy_input, save_graph=True, directory="figures/"
         )
