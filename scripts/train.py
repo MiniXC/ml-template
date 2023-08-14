@@ -273,8 +273,6 @@ def main():
     console_rule("Model")
     print_and_draw_model()
 
-    collator = get_collator(collator_args)
-
     # dataset
     console_rule("Dataset")
 
@@ -287,6 +285,9 @@ def main():
 
     console_print(f"[green]train[/green]: {len(train_ds)}")
     console_print(f"[green]val[/green]: {len(val_ds)}")
+
+    # collator
+    collator = get_collator(collator_args)
 
     # dataloader
     train_dl = DataLoader(
