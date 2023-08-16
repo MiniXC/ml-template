@@ -13,5 +13,5 @@ It's quite opinionated in the following (and probably more) ways:
 The following updates automatically every time ``scripts/train.py`` is run.
 <details>
 <summary>Click to expand</summary>
-<img src="./figures/model.gv.png"></img>
+<img src="./figures/model.png"></img>
 </details>

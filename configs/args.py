@@ -21,7 +21,7 @@ class TrainingArgs:
     dataset: str = "mnist"
     log_every_n_steps: int = 100
     do_full_eval: bool = True
-    do_save: bool = True
+    do_save: bool = False
     save_onnx: bool = False
     eval_only: bool = False
     eval_every_n_steps: int = 1000
@@ -41,3 +41,5 @@ class CollatorArgs:
 class ModelArgs:
     n_layers: int = 4
     hidden_dim: int = 512
+    dropout: float = 0.1
+    residual: bool = True

@@ -11,7 +11,31 @@ from rich.console import Console
 console = Console()
 
 from configs.args import ModelArgs
-from scripts.util.remote import push_to_hub
+
+
+class MLPLayer(nn.Module):
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        activation: nn.Module = nn.GELU(),
+        dropout: float = 0.0,
+        residual: bool = True,
+    ):
+        super().__init__()
+        self.linear = nn.Linear(in_dim, out_dim)
+        self.activation = activation
+        self.dropout = nn.Dropout(dropout)
+        self.residual = residual
+
+    def forward(self, x):
+        res_x = x
+        x = self.linear(x)
+        if self.residual:
+            x = x + res_x
+        x = self.activation(x)
+        x = self.dropout(x)
+        return x
 
 
 class SimpleMLP(nn.Module):
@@ -21,7 +45,7 @@ class SimpleMLP(nn.Module):
     ):
         super().__init__()
 
-        self.mlp = nn.Sequential(
+        self.in_layer = nn.Sequential(
             OrderedDict(
                 [
                     ("layer_in_linear", nn.Linear(28 * 28, args.hidden_dim)),
@@ -30,18 +54,29 @@ class SimpleMLP(nn.Module):
             )
         )
 
-        for n in range(args.n_layers):
-            self.mlp.add_module(
-                f"layer_{n}_linear", nn.Linear(args.hidden_dim, args.hidden_dim)
-            )
-            self.mlp.add_module(f"layer_{n}_gelu", nn.GELU())
+        self.hidden_layers = nn.ModuleList(
+            [
+                MLPLayer(
+                    args.hidden_dim,
+                    args.hidden_dim,
+                    activation=nn.GELU(),
+                    dropout=args.dropout,
+                    residual=args.residual,
+                )
+                for _ in range(args.n_layers)
+            ]
+        )
 
-        self.mlp.add_module("layer_out_linear", nn.Linear(args.hidden_dim, 10))
+        self.out_layer = nn.Linear(args.hidden_dim, 10)
 
         self.args = args
 
     def forward(self, x):
-        return self.mlp(x)
+        x = self.in_layer(x)
+        for layer in self.hidden_layers:
+            x = layer(x)
+        x = self.out_layer(x)
+        return x
 
     def save_model(self, path, accelerator=None, onnx=False):
         path = Path(path)

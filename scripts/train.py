@@ -57,7 +57,12 @@ def print_and_draw_model():
     console_print(model_summary)
     if accelerator.is_main_process:
         model_graph = draw_graph(
-            model, input_data=dummy_input, save_graph=True, directory="figures/"
+            model,
+            input_data=dummy_input,
+            save_graph=True,
+            directory="figures/",
+            filename="model",
+            expand_nested=True,
         )
 
 
