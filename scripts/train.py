@@ -22,10 +22,9 @@ from tqdm.auto import tqdm
 import yaml
 from rich.console import Console
 
-# dataframes and plotting
-# import seaborn as sns
-# import matplotlib.pyplot as plt
-# import pandas as pd
+# plotting
+import matplotlib.pyplot as plt
+from figures.plotting import plot_first_batch
 
 console = Console()
 
@@ -299,6 +298,12 @@ def main():
 
     # collator
     collator = get_collator(collator_args)
+
+    # plot first batch
+    if accelerator.is_main_process:
+        first_batch = collator([train_ds[i] for i in range(training_args.batch_size)])
+        plot_first_batch(first_batch, training_args)
+        plt.savefig("figures/first_batch.png")
 
     # dataloader
     train_dl = DataLoader(
