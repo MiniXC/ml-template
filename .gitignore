@@ -8,6 +8,7 @@ wandb/
 .vscode/
 figures/*
 !figures/*.png
+.DS_Store
 
 #####################
 # Python            #
