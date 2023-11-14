@@ -1,4 +1,6 @@
-import torch
+import sys
+
+sys.path.append(".")
 
 from model.simple_mlp import SimpleMLP
 from configs.args import ModelArgs
