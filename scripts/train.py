@@ -2,11 +2,14 @@ import os
 import sys
 from collections import deque
 from pathlib import Path
+import typing
+from dataclasses import fields
 
 sys.path.append(".")  # add root of project to path
 
 # torch & hf
 import torch
+from torch import nn
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from transformers import get_linear_schedule_with_warmup, HfArgumentParser
@@ -24,7 +27,7 @@ from rich.console import Console
 
 # plotting
 import matplotlib.pyplot as plt
-from figures.plotting import plot_first_batch
+from util.plotting import plot_first_batch
 
 console = Console()
 
@@ -35,88 +38,11 @@ from util.remote import wandb_update_config, wandb_init, push_to_hub
 from model.simple_mlp import SimpleMLP
 from collators import get_collator
 
-
-def print_and_draw_model():
-    dummy_input = model.dummy_input
-    # repeat dummy input to match batch size (regardless of how many dimensions)
-    dummy_input = dummy_input.repeat(
-        (training_args.batch_size,) + (1,) * (len(dummy_input.shape) - 1)
-    )
-    console_print(f"[green]input shape[/green]: {dummy_input.shape}")
-    model_summary = summary(
-        model,
-        input_data=dummy_input,
-        verbose=0,
-        col_names=[
-            "input_size",
-            "output_size",
-            "num_params",
-        ],
-    )
-    console_print(model_summary)
-    if accelerator.is_main_process:
-        model_graph = draw_graph(
-            model,
-            input_data=dummy_input,
-            save_graph=True,
-            directory="figures/",
-            filename="model",
-            expand_nested=True,
-        )
-
-
-def console_print(*args, **kwargs):
-    if accelerator.is_main_process:
-        console.print(*args, **kwargs)
-
-
-def console_rule(*args, **kwargs):
-    if accelerator.is_main_process:
-        console.rule(*args, **kwargs)
-
-
-def wandb_log(prefix, log_dict, round_n=3, print_log=True):
-    if accelerator.is_main_process:
-        log_dict = {f"{prefix}/{k}": v for k, v in log_dict.items()}
-        wandb.log(log_dict, step=global_step)
-        if print_log:
-            log_dict = {k: round(v, round_n) for k, v in log_dict.items()}
-            console.log(log_dict)
-
-
-def seed_everything(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-
-
-def save_checkpoint():
-    accelerator.wait_for_everyone()
-    checkpoint_name = training_args.run_name
-    checkpoint_path = (
-        Path(training_args.checkpoint_path) / checkpoint_name / f"step_{global_step}"
-    )
-    # model
-    model.save_model(checkpoint_path, accelerator, onnx=training_args.save_onnx)
-    if accelerator.is_main_process:
-        # training args
-        with open(checkpoint_path / "training_args.yml", "w") as f:
-            f.write(yaml.dump(training_args.__dict__, Dumper=yaml.Dumper))
-        # collator args
-        with open(checkpoint_path / "collator_args.yml", "w") as f:
-            f.write(yaml.dump(collator_args.__dict__, Dumper=yaml.Dumper))
-        if training_args.push_to_hub:
-            push_to_hub(
-                training_args.hub_repo,
-                checkpoint_path,
-                commit_message=f"step {global_step}",
-            )
-    accelerator.wait_for_everyone()
+MODEL_CLASS = SimpleMLP
 
 
 def train_epoch(epoch):
     global global_step
-    model.train()
     losses = deque(maxlen=training_args.log_every_n_steps)
     step = 0
     console_rule(f"Epoch {epoch}")
@@ -124,7 +50,7 @@ def train_epoch(epoch):
     for batch in train_dl:
         with accelerator.accumulate(model):
             y = model(batch["image"])
-            loss = torch.nn.functional.cross_entropy(y, batch["target"])
+            loss = loss_func(y, batch["target"])
             accelerator.backward(loss)
             accelerator.clip_grad_norm_(
                 model.parameters(), training_args.gradient_clip_val
@@ -167,26 +93,27 @@ def train_epoch(epoch):
                 pbar.set_postfix({"loss": f"{last_loss:.3f}"})
 
 
-def evaluate():
-    model.eval()
-    y_true = []
-    y_pred = []
-    losses = []
-    console_rule("Evaluation")
-    for batch in val_dl:
-        y = model(batch["image"])
-        loss = torch.nn.functional.cross_entropy(y, batch["target"])
-        losses.append(loss.detach())
-        y_true.append(batch["target"].cpu().numpy())
-        y_pred.append(y.argmax(-1).cpu().numpy())
-    y_true = np.concatenate(y_true)
-    y_pred = np.concatenate(y_pred)
-    wandb_log("val", {"loss": torch.mean(torch.tensor(losses)).item()})
-    acc = accuracy_score(y_true, y_pred)
-    f1 = f1_score(y_true, y_pred, average="macro")
-    precision = precision_score(y_true, y_pred, average="macro", zero_division=0)
-    recall = recall_score(y_true, y_pred, average="macro")
-    wandb_log("val", {"acc": acc, "f1": f1, "precision": precision, "recall": recall})
+def evaluate(device="cpu"):
+    eval_model = create_latest_model_for_eval(device)
+    if accelerator.is_main_process:
+        y_true = []
+        y_pred = []
+        console_rule("Evaluation")
+        for batch in val_dl:
+            batch = move_batch_to_device(batch, "cpu")
+            y = eval_model(batch["image"])
+            y_true.append(batch["target"].cpu().numpy())
+            y_pred.append(y.argmax(-1).cpu().numpy())
+        y_true = np.concatenate(y_true)
+        y_pred = np.concatenate(y_pred)
+        acc = accuracy_score(y_true, y_pred)
+        f1 = f1_score(y_true, y_pred, average="macro")
+        precision = precision_score(y_true, y_pred, average="macro", zero_division=0)
+        recall = recall_score(y_true, y_pred, average="macro")
+        wandb_log(
+            "val", {"acc": acc, "f1": f1, "precision": precision, "recall": recall}
+        )
+        evaluate_loss_only()
 
 
 def evaluate_loss_only():
@@ -195,48 +122,26 @@ def evaluate_loss_only():
     console_rule("Evaluation")
     for batch in val_dl:
         y = model(batch["image"])
-        loss = torch.nn.functional.cross_entropy(y, batch["target"])
+        loss = loss_func(y, batch["target"])
         losses.append(loss.detach())
     wandb_log("val", {"loss": torch.mean(torch.tensor(losses)).item()})
 
 
 def main():
-    global accelerator, training_args, model_args, collator_args, train_dl, val_dl, optimizer, scheduler, model, global_step, pbar
+    global accelerator, training_args, model_args, collator_args, train_dl, val_dl, optimizer, scheduler, model, global_step, pbar, loss_func
 
     global_step = 0
 
-    parser = HfArgumentParser([TrainingArgs, ModelArgs, CollatorArgs])
-
     accelerator = Accelerator()
 
+    loss_func = nn.CrossEntropyLoss()
+
     # parse args
-    if len(sys.argv) > 1 and sys.argv[1].endswith(".yml"):
-        with open(sys.argv[1], "r") as f:
-            args_dict = yaml.load(f, Loader=yaml.Loader)
-        # additonally parse args from command line
-        (
-            training_args,
-            model_args,
-            collator_args,
-        ) = parser.parse_args_into_dataclasses(sys.argv[2:])
-        # update args from yaml
-        for k, v in args_dict.items():
-            if hasattr(training_args, k):
-                setattr(training_args, k, v)
-            if hasattr(model_args, k):
-                setattr(model_args, k, v)
-            if hasattr(collator_args, k):
-                setattr(collator_args, k, v)
-        if len(sys.argv) > 2:
-            console_print(
-                f"[yellow]WARNING[/yellow]: yaml args will be override command line args"
-            )
-    else:
-        (
-            training_args,
-            model_args,
-            collator_args,
-        ) = parser.parse_args_into_dataclasses()
+    (
+        training_args,
+        model_args,
+        collator_args,
+    ) = parse_args([TrainingArgs, ModelArgs, CollatorArgs])
 
     # check if run name is specified
     if training_args.run_name is None:
@@ -279,7 +184,7 @@ def main():
     console_print(f"[green]process_index[/green]: {accelerator.process_index}")
 
     # model
-    model = SimpleMLP(model_args)
+    model = MODEL_CLASS(model_args)
     console_rule("Model")
     print_and_draw_model()
 
@@ -374,6 +279,159 @@ def main():
             f"use \n[magenta]wandb sync {Path(wandb.run.dir).parent}[/magenta]\nto sync offline run"
         )
 
+
+# helper functions (change them in parent repository if needed)
+
+
+def parse_args(argument_classes):
+    parser = HfArgumentParser(argument_classes)
+    type_dicts = []
+    for arg_class in argument_classes:
+        resolved_hints = typing.get_type_hints(arg_class)
+        field_names = [field.name for field in fields(arg_class)]
+        resolved_field_types = {name: resolved_hints[name] for name in field_names}
+        type_dicts.append(resolved_field_types)
+    if len(sys.argv) > 1 and sys.argv[1].endswith(".yml"):
+        with open(sys.argv[1], "r") as f:
+            args_dict = yaml.load(f, Loader=yaml.Loader)
+        # additonally parse args from command line
+        parsed_args = parser.parse_args_into_dataclasses(sys.argv[2:])
+        args_in_argv = sys.argv[2:]
+        updated_args = []
+        for arg in args_in_argv:
+            if "--" in arg:
+                arg = arg.replace("--", "")
+                updated_args.append(arg)
+            if "=" in arg:
+                arg1, arg2 = arg.split("=")
+                updated_args.append(arg1)
+                updated_args.append(arg2)
+        # remove every second element (values)
+        updated_args = updated_args[::2]
+        args_in_argv = updated_args
+        # update args from yaml (only if not specified in command line)
+        for k, v in args_dict.items():
+            for j, arg_class in enumerate(parsed_args):
+                if hasattr(arg_class, k) and k not in args_in_argv:
+                    setattr(arg_class, k, type_dicts[j][k](v))
+    else:
+        parsed_args = parser.parse_args_into_dataclasses()
+    return parsed_args
+
+
+def print_and_draw_model():
+    bsz = training_args.batch_size
+    dummy_input = model.dummy_input
+    # repeat dummy input to match batch size (regardless of how many dimensions)
+    if isinstance(dummy_input, torch.Tensor):
+        dummy_input = dummy_input.repeat((bsz,) + (1,) * (len(dummy_input.shape) - 1))
+        console_print(f"[green]input shape[/green]: {dummy_input.shape}")
+    elif isinstance(dummy_input, list):
+        dummy_input = [
+            x.repeat((bsz,) + (1,) * (len(x.shape) - 1)) for x in dummy_input
+        ]
+        console_print(f"[green]input shapes[/green]: {[x.shape for x in dummy_input]}")
+    model_summary = summary(
+        model,
+        input_data=dummy_input,
+        verbose=0,
+        col_names=[
+            "input_size",
+            "output_size",
+            "num_params",
+        ],
+    )
+    console_print(model_summary)
+    Path("figures").mkdir(exist_ok=True)
+    if accelerator.is_main_process:
+        _ = draw_graph(
+            model,
+            input_data=dummy_input,
+            save_graph=True,
+            directory="figures/",
+            filename="model",
+            expand_nested=True,
+        )
+        # remove "figures/model" file
+        os.remove("figures/model")
+
+
+def console_print(*args, **kwargs):
+    if accelerator.is_main_process:
+        console.print(*args, **kwargs)
+
+
+def console_rule(*args, **kwargs):
+    if accelerator.is_main_process:
+        console.rule(*args, **kwargs)
+
+
+def wandb_log(prefix, log_dict, round_n=3, print_log=True):
+    if accelerator.is_main_process:
+        log_dict = {f"{prefix}/{k}": v for k, v in log_dict.items()}
+        wandb.log(log_dict, step=global_step)
+        if print_log:
+            log_dict = {k: round(v, round_n) for k, v in log_dict.items()}
+            console.log(log_dict)
+
+
+def seed_everything(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+
+
+def save_checkpoint(name_override=None):
+    accelerator.wait_for_everyone()
+    checkpoint_name = training_args.run_name
+    if name_override is not None:
+        name = name_override
+    else:
+        name = f"step_{global_step}"
+    checkpoint_path = Path(training_args.checkpoint_path) / checkpoint_name / name
+    if name_override is None:
+        # remove old checkpoints
+        if checkpoint_path.exists():
+            for f in checkpoint_path.iterdir():
+                os.remove(f)
+    # model
+    model.save_model(checkpoint_path, accelerator)
+    if accelerator.is_main_process:
+        # training args
+        with open(checkpoint_path / "training_args.yml", "w") as f:
+            f.write(yaml.dump(training_args.__dict__, Dumper=yaml.Dumper))
+        # collator args
+        with open(checkpoint_path / "collator_args.yml", "w") as f:
+            f.write(yaml.dump(collator_args.__dict__, Dumper=yaml.Dumper))
+    accelerator.wait_for_everyone()
+    return checkpoint_path
+
+
+def create_latest_model_for_eval(device="cpu"):
+    checkpoint_path = save_checkpoint("latest")
+    if accelerator.is_main_process:
+        eval_model = MODEL_CLASS.from_pretrained(checkpoint_path)
+        eval_model.eval()
+        eval_model = eval_model.to(device)
+    return eval_model
+
+
+def move_batch_to_device(batch, device):
+    if isinstance(batch, dict):
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                batch[k] = move_batch_to_device(batch[k], device)
+            elif isinstance(v, list):
+                # recursively move list of tensors to device
+                batch[k] = move_batch_to_device(batch[k], device)
+    elif isinstance(batch, list):
+        batch = [move_batch_to_device(x, device) for x in batch]
+    elif isinstance(batch, torch.Tensor):
+        batch = batch.to(device)
+    return batch
+
+
+# main
 
 if __name__ == "__main__":
     main()

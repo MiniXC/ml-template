@@ -78,18 +78,13 @@ class SimpleMLP(nn.Module):
         x = self.out_layer(x)
         return x
 
-    def save_model(self, path, accelerator=None, onnx=False):
+    def save_model(self, path, accelerator=None):
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         if accelerator is not None:
             accelerator.save_model(self, path)
         else:
             torch.save(self.state_dict(), path / "pytorch_model.bin")
-        if onnx:
-            try:
-                self.export_onnx(path / "model.onnx")
-            except Exception as e:
-                console.print(f"[red]Skipping ONNX export[/red]: {e}")
         with open(path / "model_config.yml", "w") as f:
             f.write(yaml.dump(self.args.__dict__, Dumper=yaml.Dumper))
 
@@ -112,19 +107,3 @@ class SimpleMLP(nn.Module):
     def dummy_input(self):
         torch.manual_seed(0)
         return torch.randn(1, 28 * 28)
-
-    def export_onnx(self, path):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        torch.onnx.export(
-            self,
-            self.dummy_input,
-            path,
-            input_names=["input"],
-            output_names=["output"],
-            dynamic_axes={
-                "input": {0: "batch_size"},
-                "output": {0: "batch_size"},
-            },
-            opset_version=11,
-        )
